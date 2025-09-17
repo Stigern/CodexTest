@@ -8,13 +8,14 @@ DB_FILE = "printer_service.db"
 
 
 def get_connection():
-    return sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
 
 
 def initialize_database():
     os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
     with get_connection() as conn:
-        conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS printers (
@@ -48,6 +49,127 @@ def initialize_database():
             conn.execute("ALTER TABLE printers ADD COLUMN ams INTEGER DEFAULT 0;")
 
 
+def _coerce_hours(hours):
+    try:
+        return int(hours) if str(hours).strip() != "" else 0
+    except ValueError:
+        raise ValueError("Hours must be an integer")
+
+
+def db_fetch_printers(sort_hours=None):
+    with get_connection() as conn:
+        order_clause = "ORDER BY name"
+        if sort_hours == "asc":
+            order_clause = "ORDER BY hours ASC, name"
+        elif sort_hours == "desc":
+            order_clause = "ORDER BY hours DESC, name"
+        rows = conn.execute(
+            f"SELECT id, printer_id, name, manufacturer, model, hours, nozzle_type, ams FROM printers {order_clause}"
+        ).fetchall()
+        return rows
+
+
+def db_insert_printer(printer_id, name, manufacturer, model, hours, nozzle_type, ams):
+    hours_val = _coerce_hours(hours)
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (printer_id, name, manufacturer, model, hours, nozzle_type, ams) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                printer_id.strip(),
+                name.strip(),
+                manufacturer.strip(),
+                model.strip(),
+                hours_val,
+                (nozzle_type or "").strip(),
+                1 if ams else 0,
+            ),
+        )
+
+
+def db_update_printer(db_id, printer_id, name, manufacturer, model, hours, nozzle_type, ams):
+    hours_val = _coerce_hours(hours)
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE printers
+            SET printer_id = ?, name = ?, manufacturer = ?, model = ?, hours = ?, nozzle_type = ?, ams = ?
+            WHERE id = ?
+            """,
+            (
+                printer_id.strip(),
+                name.strip(),
+                manufacturer.strip(),
+                model.strip(),
+                hours_val,
+                (nozzle_type or "").strip(),
+                1 if ams else 0,
+                db_id,
+            ),
+        )
+
+
+def db_delete_printer(db_id):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM printers WHERE id = ?", (db_id,))
+
+
+def db_get_printer_by_db_id(db_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT printer_id, name, manufacturer, model, hours, nozzle_type, ams
+            FROM printers WHERE id = ?
+            """,
+            (db_id,),
+        ).fetchone()
+        return row
+
+
+def ensure_unique_printer_id(base_printer_id):
+    base = base_printer_id.strip() or "printer"
+    candidate = base
+    idx = 1
+    with get_connection() as conn:
+        while True:
+            exists = conn.execute(
+                "SELECT 1 FROM printers WHERE printer_id = ? LIMIT 1", (candidate,)
+            ).fetchone()
+            if not exists:
+                return candidate
+            idx += 1
+            candidate = f"{base}-{idx}"
+
+
+def db_fetch_logs_for(db_id):
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, created_at, note FROM service_logs WHERE printer_id_fk = ? ORDER BY created_at DESC",
+            (db_id,),
+        ).fetchall()
+        return rows
+
+
+def db_insert_log(db_id, note):
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO service_logs (printer_id_fk, note) VALUES (?, ?)",
+            (db_id, note.strip()),
+        )
+
+
+def db_update_log(log_id, note):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE service_logs SET note = ? WHERE id = ?",
+            (note.strip(), log_id),
+        )
+
+
+def db_delete_log(log_id):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM service_logs WHERE id = ?", (log_id,))
+
+
 class PrinterServiceApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -64,7 +186,7 @@ class PrinterServiceApp(tk.Tk):
     # UI construction
     def _build_ui(self):
         # Split into left (list) and right (form + logs)
-        container = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        container = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         container.pack(fill=tk.BOTH, expand=True)
 
         # Left pane: printers list
@@ -163,116 +285,34 @@ class PrinterServiceApp(tk.Tk):
 
     # DB helpers
     def fetch_printers(self):
-        with get_connection() as conn:
-            conn.execute("PRAGMA foreign_keys = ON;")
-            order_clause = "ORDER BY name"
-            if self.sort_hours == 'asc':
-                order_clause = "ORDER BY hours ASC, name"
-            elif self.sort_hours == 'desc':
-                order_clause = "ORDER BY hours DESC, name"
-            rows = conn.execute(
-                f"SELECT id, printer_id, name, manufacturer, model, hours, nozzle_type, ams FROM printers {order_clause}"
-            ).fetchall()
-            return rows
+        return db_fetch_printers(self.sort_hours)
 
     def insert_printer(self, printer_id, name, manufacturer, model, hours, nozzle_type, ams):
-        try:
-            hours_val = int(hours) if str(hours).strip() != "" else 0
-        except ValueError:
-            raise ValueError("Hours must be an integer")
-        with get_connection() as conn:
-            conn.execute(
-                "INSERT INTO printers (printer_id, name, manufacturer, model, hours, nozzle_type, ams) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    printer_id.strip(),
-                    name.strip(),
-                    manufacturer.strip(),
-                    model.strip(),
-                    hours_val,
-                    (nozzle_type or "").strip(),
-                    1 if ams else 0,
-                ),
-            )
+        db_insert_printer(printer_id, name, manufacturer, model, hours, nozzle_type, ams)
 
     def update_printer(self, db_id, printer_id, name, manufacturer, model, hours, nozzle_type, ams):
-        try:
-            hours_val = int(hours) if str(hours).strip() != "" else 0
-        except ValueError:
-            raise ValueError("Hours must be an integer")
-        with get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE printers
-                SET printer_id = ?, name = ?, manufacturer = ?, model = ?, hours = ?, nozzle_type = ?, ams = ?
-                WHERE id = ?
-                """,
-                (
-                    printer_id.strip(),
-                    name.strip(),
-                    manufacturer.strip(),
-                    model.strip(),
-                    hours_val,
-                    (nozzle_type or "").strip(),
-                    1 if ams else 0,
-                    db_id,
-                ),
-            )
+        db_update_printer(db_id, printer_id, name, manufacturer, model, hours, nozzle_type, ams)
 
     def delete_printer(self, db_id):
-        with get_connection() as conn:
-            conn.execute("DELETE FROM printers WHERE id = ?", (db_id,))
+        db_delete_printer(db_id)
 
     def get_printer_by_db_id(self, db_id):
-        with get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT printer_id, name, manufacturer, model, hours, nozzle_type, ams
-                FROM printers WHERE id = ?
-                """,
-                (db_id,),
-            ).fetchone()
-            return row
+        return db_get_printer_by_db_id(db_id)
 
     def ensure_unique_printer_id(self, base_printer_id):
-        base = base_printer_id.strip() or "printer"
-        candidate = base
-        idx = 1
-        with get_connection() as conn:
-            while True:
-                exists = conn.execute(
-                    "SELECT 1 FROM printers WHERE printer_id = ? LIMIT 1", (candidate,)
-                ).fetchone()
-                if not exists:
-                    return candidate
-                idx += 1
-                candidate = f"{base}-{idx}"
+        return ensure_unique_printer_id(base_printer_id)
 
     def fetch_logs_for(self, db_id):
-        with get_connection() as conn:
-            conn.execute("PRAGMA foreign_keys = ON;")
-            rows = conn.execute(
-                "SELECT id, created_at, note FROM service_logs WHERE printer_id_fk = ? ORDER BY created_at DESC",
-                (db_id,),
-            ).fetchall()
-            return rows
+        return db_fetch_logs_for(db_id)
 
     def insert_log(self, db_id, note):
-        with get_connection() as conn:
-            conn.execute(
-                "INSERT INTO service_logs (printer_id_fk, note) VALUES (?, ?)",
-                (db_id, note.strip()),
-            )
+        db_insert_log(db_id, note)
 
     def update_log(self, log_id, note):
-        with get_connection() as conn:
-            conn.execute(
-                "UPDATE service_logs SET note = ? WHERE id = ?",
-                (note.strip(), log_id),
-            )
+        db_update_log(log_id, note)
 
     def delete_log(self, log_id):
-        with get_connection() as conn:
-            conn.execute("DELETE FROM service_logs WHERE id = ?", (log_id,))
+        db_delete_log(log_id)
 
     # UI actions
     def refresh_printers(self):

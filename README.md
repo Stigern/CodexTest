@@ -4,7 +4,7 @@ A simple desktop app to track printers and their service notes. Built with Pytho
 
 ## Features
 - Create, view, edit, and delete printers
-  - Fields: Printer ID, Name, Manufacturer, Model, Hours
+  - Fields: Printer ID, Name, Manufacturer, Model, Hours, Nozzle Type, AMS
 - Add, edit, and delete service notes/tasks for each printer
 - Notes auto-stamp the created date
 - All data stored locally in `printer_service.db`
